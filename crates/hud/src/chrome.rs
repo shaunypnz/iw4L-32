@@ -739,10 +739,16 @@ pub(crate) fn text_width(font: &FontDef, text: &str) -> i32 {
             width = 0;
             continue;
         }
-        let Some(glyph) = font.glyph(letter) else {
+        let dx = if char::from_u32(letter)
+            .and_then(frame::ControllerIcon::from_char)
+            .is_some()
+        {
+            font.pixel_height
+        } else if let Some(glyph) = font.glyph(letter) {
+            i32::from(glyph.dx)
+        } else {
             continue;
         };
-        let dx = i32::from(glyph.dx);
         width += dx;
         if max_width < width {
             max_width = width;

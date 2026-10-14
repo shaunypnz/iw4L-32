@@ -174,7 +174,7 @@ fn snapshot_client_team(presented: &net::PresentedSnapshot, client: i32) -> i32 
         .map_or(0, |meta| meta.client_state_team)
 }
 
-fn obituary_name_color(local_team: i32, team: i32, dvars: sim::ScriptDvars<'_>) -> [f32; 4] {
+pub fn team_name_color(local_team: i32, team: i32, dvars: sim::ScriptDvars<'_>) -> [f32; 4] {
     if !matches!(local_team, 1 | 2) || !matches!(team, 1 | 2) {
         return [1.0, 1.0, 1.0, 1.0];
     }
@@ -341,6 +341,9 @@ pub(crate) fn update_killfeed(
 
     let now = clock.time();
     for cmd in notifies.read() {
+        if cmd.tag == net::SVC_CHAT {
+            continue;
+        }
         if !window.seen.insert(cmd.id) {
             continue;
         }
@@ -577,7 +580,7 @@ pub(crate) fn update_killfeed(
                             applied.h,
                             font_material.clone(),
                             attacker.clone(),
-                            obituary_name_color(local_team, *attacker_team, dvars),
+                            team_name_color(local_team, *attacker_team, dvars),
                             "killfeed_obituary",
                         ));
                         x_virtual += attacker_w + icon_spacing;
@@ -641,7 +644,7 @@ pub(crate) fn update_killfeed(
                         applied.h,
                         font_material.clone(),
                         victim.clone(),
-                        obituary_name_color(local_team, *victim_team, dvars),
+                        team_name_color(local_team, *victim_team, dvars),
                         "killfeed_obituary",
                     ));
                 }

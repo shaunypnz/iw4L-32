@@ -17,6 +17,12 @@ pub fn presented_is_third_person(
     in_killcam: bool,
     third_person: bool,
 ) -> bool {
+    if presented.external_camera() {
+        return true;
+    }
+    if presented.first_person_camera() {
+        return false;
+    }
     let Some(ps) = presented.player(local) else {
         return false;
     };

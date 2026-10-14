@@ -46,6 +46,7 @@ pub struct PresentLocalCensus {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct PresentedSnapshot {
+    external_camera: Option<bool>,
     inner: Option<Arc<Snapshot>>,
     previous_inner: Option<Arc<Snapshot>>,
     frame_interpolation: f32,
@@ -60,12 +61,29 @@ pub struct PresentedSnapshot {
 }
 
 impl PresentedSnapshot {
+    pub fn external_camera(&self) -> bool {
+        self.external_camera == Some(true)
+    }
+
+    pub fn first_person_camera(&self) -> bool {
+        self.external_camera == Some(false)
+    }
+
+    pub fn set_first_person_camera(&mut self) {
+        self.external_camera = Some(false);
+    }
+
+    pub fn set_external_camera(&mut self, external: bool) {
+        self.external_camera = external.then_some(true);
+    }
+
     pub fn weapon_epoch(&self) -> Option<u32> {
         self.snapshot()
             .map(|snapshot| snapshot.meta.world_objects.map_round_epoch)
     }
 
     pub fn clear(&mut self) {
+        self.external_camera = None;
         self.inner = None;
         self.previous_inner = None;
         self.frame_interpolation = 0.0;

@@ -230,6 +230,27 @@ pub fn sync_camera_from_presented(
     death_cam_clip: Res<crate::occupancy::dyn_ent::DynEntPhysClip>,
 ) {
     kick.killcam_focus_distance = None;
+    if let Some(view) = sim_cam.view_override {
+        for mut transform in &mut q {
+            *transform = view.transform;
+        }
+        for mut projection in &mut lenses {
+            if let Projection::Perspective(perspective) = &mut *projection {
+                perspective.fov = horizontal_to_vertical_fov_deg(view.horizontal_fov).to_radians();
+            }
+        }
+        kick.horiz_fov_deg = view.horizontal_fov;
+        kick.refdef_vieworg = view.transform.translation.to_array();
+        let forward = *view.transform.forward();
+        let right = *view.transform.right();
+        let up = *view.transform.up();
+        kick.refdef_view_angles = [
+            -forward.z.clamp(-1.0, 1.0).asin().to_degrees(),
+            forward.y.atan2(forward.x).to_degrees(),
+            (-right.z).atan2(up.z).to_degrees(),
+        ];
+        return;
+    }
     if !sim_cam.enabled {
         return;
     }

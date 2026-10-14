@@ -70,6 +70,18 @@ impl PlayerAnimSources {
                     return;
                 }
             }
+        } else if family == asset_core::FamilyId::T6 && path == MULTIPLAYER_ANIMTREE_PATH {
+            let decoded = data.get(..4).and_then(|size| {
+                let size = u32::from_le_bytes(size.try_into().ok()?) as usize;
+                asset_transport::inflate_deflate(&data[4..], size)
+                    .ok()
+                    .filter(|bytes| bytes.len() == size)
+            });
+            let Some(bytes) = decoded else {
+                self.decode_errors.push(path);
+                return;
+            };
+            bytes
         } else {
             data.to_vec()
         };
@@ -112,16 +124,23 @@ impl PlayerAnimSources {
             self.parsed_script = Some(crate::playeranim_parse::parse_player_anim_script(
                 script,
                 tree,
-                self.family == Some(asset_core::AssetNamespace::T5),
+                matches!(
+                    self.family,
+                    Some(asset_core::FamilyId::T5 | asset_core::FamilyId::T6)
+                ),
+                (self.family == Some(asset_core::FamilyId::T6))
+                    .then_some(self.playeranim_types.as_deref())
+                    .flatten(),
             ));
         }
-        if self.family == Some(asset_core::AssetNamespace::T5)
-            && let (Some(Ok(tree)), Some(Ok(script)), Some(atr)) = (
-                self.compiled.as_ref(),
-                self.parsed_script.as_ref(),
-                self.multiplayer_atr.as_deref(),
-            )
-        {
+        if matches!(
+            self.family,
+            Some(asset_core::FamilyId::T5 | asset_core::FamilyId::T6)
+        ) && let (Some(Ok(tree)), Some(Ok(script)), Some(atr)) = (
+            self.compiled.as_ref(),
+            self.parsed_script.as_ref(),
+            self.multiplayer_atr.as_deref(),
+        ) {
             self.compiled = Some(crate::atr_compile::compile_selected_multiplayer(
                 atr, tree, script,
             ));
@@ -129,7 +148,12 @@ impl PlayerAnimSources {
                 && let Some(script) = self.playeranim_script.as_deref()
             {
                 self.parsed_script = Some(crate::playeranim_parse::parse_player_anim_script(
-                    script, tree, true,
+                    script,
+                    tree,
+                    true,
+                    (self.family == Some(asset_core::FamilyId::T6))
+                        .then_some(self.playeranim_types.as_deref())
+                        .flatten(),
                 ));
             }
         }

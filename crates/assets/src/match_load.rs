@@ -29,6 +29,7 @@ pub struct MatchLoadRequest {
     pub zone_ff: Result<PathBuf, String>,
     pub common_mp: Result<PathBuf, String>,
     pub progress: LoadProgress,
+    pub families: frame::AssetFamilies,
 }
 
 #[derive(Resource)]
@@ -43,6 +44,7 @@ pub struct MatchLoadAccepted {
     pub request_id: u64,
     pub load_key: frame::LocalLoadKey,
     pub zone: String,
+    pub families: frame::AssetFamilies,
 }
 
 #[derive(Resource)]
@@ -150,17 +152,21 @@ fn start_match_load(
         cancel_handle.clone(),
     ));
 
+    let families = request.families;
     let games = identity.map(|identity| asset_transport::GamesRoot(identity.games_root.clone()));
     let task = crate::session_load::load_pool().spawn(async move {
         let sound_path = zone_ff.clone();
-        match load_prepared_match(zone_ff, common_mp, progress.clone()).await {
+        match load_prepared_match(zone_ff, common_mp, progress.clone(), families).await {
             MatchLoadOutcome::Ready(mut prepared) => {
                 if progress.is_canceled() {
                     return Ok(None);
                 }
                 prepared.sound = Some(match (games, sound_path) {
                     (Some(games), Ok(path)) => {
-                        let sources = asset_audio::gather_sound_sources(&games, &path);
+                        let sources =
+                            asset_audio::gather_sound_sources_filtered(&games, &path, |ns| {
+                                families.enabled(ns.as_str())
+                            });
                         let map = prepared
                             .sound
                             .take()
@@ -207,6 +213,7 @@ fn start_match_load(
                 request_id,
                 load_key,
                 zone: zone_accepted,
+                families,
             },
             frame::MatchScope::Loading,
         );
@@ -230,6 +237,9 @@ fn approve_map_load(
     mut approved: MessageReader<MapLoadApproved>,
     mut failed: MessageWriter<MapLoadFailed>,
     identity: Res<LaunchIdentity>,
+    role: Res<frame::RuntimeRole>,
+    dvars: Res<frame::UiMenuDvars>,
+    server_families: Option<Res<frame::AssetFamilies>>,
     abort: Option<Res<MatchLoadAbort>>,
 ) {
     for request in approved.read() {
@@ -246,6 +256,44 @@ fn approve_map_load(
             continue;
         }
         let games = asset_transport::GamesRoot(identity.games_root.clone());
+        let trees = asset_transport::NamespaceTrees::discover(&games);
+        let have = trees.present().fold(0, |mask, (ns, _)| {
+            mask | match ns.as_str() {
+                "iw4" => 1,
+                "iw5" => 2,
+                "t5" => 4,
+                "t6" => 8,
+                _ => 0,
+            }
+        });
+        let selection =
+            if *role == frame::RuntimeRole::Client || !request.load_key.match_key.is_none() {
+                server_families
+                    .as_deref()
+                    .copied()
+                    .ok_or_else(|| "Server asset families were not supplied".to_owned())
+            } else {
+                frame::AssetFamilies::from_inventory(have, &dvars)
+            };
+        let selection = selection.and_then(|families| {
+            families.require_map(&request.zone)?;
+            if let Some(message) = families.missing_notice(have) {
+                return Err(message);
+            }
+            Ok(families)
+        });
+        let families = match selection {
+            Ok(families) => families,
+            Err(error) => {
+                failed.write(MapLoadFailed {
+                    request_id: request.request_id,
+                    load_key: request.load_key,
+                    zone: request.zone.clone(),
+                    error,
+                });
+                continue;
+            }
+        };
         let found = asset_transport::find_zone_file(&games, &request.zone);
         let zone = found
             .as_ref()
@@ -280,6 +328,7 @@ fn approve_map_load(
             zone_ff,
             common_mp,
             progress,
+            families,
         });
     }
 }

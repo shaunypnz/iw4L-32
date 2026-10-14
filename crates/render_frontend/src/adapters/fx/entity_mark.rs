@@ -260,9 +260,9 @@ fn stage(
             }
             let global = bone_base + bone;
             if !ids.iter().all(|&i| {
-                skel.vert_skin.get(i).is_some_and(|w| {
-                    w.bones[0] as usize == bone && w.weights == [1.0, 0.0, 0.0, 0.0]
-                })
+                skel.vert_skin
+                    .get(i)
+                    .is_some_and(|w| w.bones[0] as usize == bone && w.has_only_primary_weight())
             }) {
                 state.unsupported_triangles += 1;
                 continue;
@@ -300,7 +300,7 @@ fn stage(
             if n < 3 {
                 continue;
             }
-            let [Some(n0), Some(n1), Some(n2)] = ids.map(|i| skel.normals.get(i).copied()) else {
+            let [Some(n0), Some(n1), Some(n2)] = ids.map(|i| skel.normal(i)) else {
                 continue;
             };
             let inverse = matrix.inverse();

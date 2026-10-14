@@ -29,4 +29,4 @@ the viewer's world. `render_anim::occupancy::killcam` owns camera transitions.
 `Snapshot::view_tick` supplies the clock for replay events. Audio context and
 FX ownership follow the entity event timeline.
 
-Mover camera metadata uses game protocol 112; peers must use the same build.
+Mover camera metadata requires matching game protocols between peers.

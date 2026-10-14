@@ -134,6 +134,7 @@ pub(crate) fn parse_player_anim_script(
     script: &[u8],
     tree: &CompiledAnimTreeDefinition,
     t5_syntax: bool,
+    player_anim_types: Option<&[u8]>,
 ) -> Result<Arc<ParsedPlayerAnimScript>, PlayerAnimParseError> {
     let mut parser = AtrParser::new(script);
     let mut parsed = ParsedPlayerAnimScript {
@@ -153,6 +154,24 @@ pub(crate) fn parse_player_anim_script(
     let mut current_items: Option<Vec<ParsedAnimItem>> = None;
     let mut current_event_items: Option<Vec<ParsedAnimItem>> = None;
     let mut aliases: HashMap<(u8, String), u64> = HashMap::new();
+    if let Some(types) = player_anim_types {
+        let mut types = AtrParser::new(types);
+        for index in 0..64 {
+            let name = types.parse(true);
+            if name.is_empty() {
+                break;
+            }
+            if index_ci(&name, anim_iw4::ANIM_PLAYERANIMTYPE_NAMES).is_none() {
+                continue;
+            }
+            for condition in [
+                anim_iw4::ANIM_COND_PLAYERANIMTYPE,
+                anim_iw4::ANIM_COND_PLAYERANIMTYPEPRIMARY,
+            ] {
+                aliases.insert((condition, ascii_lower(&name)), 1u64 << index);
+            }
+        }
+    }
 
     loop {
         let token = parser.parse(true);
@@ -456,6 +475,13 @@ fn resolve_cond_value(
 ) -> Option<ResolvedCondValue> {
     if ANIM_COND_IS_BITFLAGS[usize::from(index)] && token.eq_ignore_ascii_case("all") {
         return Some(ResolvedCondValue::Bits(u64::MAX));
+    }
+    if matches!(
+        index,
+        anim_iw4::ANIM_COND_PLAYERANIMTYPE | anim_iw4::ANIM_COND_PLAYERANIMTYPEPRIMARY
+    ) && let Some(bits) = aliases.get(&(index, ascii_lower(token)))
+    {
+        return Some(ResolvedCondValue::Bits(*bits));
     }
     let names = anim_cond_value_names(index);
     if let Some(v) = index_ci(token, names) {

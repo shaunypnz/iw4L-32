@@ -464,6 +464,13 @@ impl MenuCatalog {
         seen.len()
     }
 
+    pub fn insert_string_table(&mut self, table: CapturedStringTable) {
+        self.string_tables
+            .retain(|name, _| !name.eq_ignore_ascii_case(&table.name));
+        self.string_tables
+            .insert(table.name.to_ascii_lowercase(), table);
+    }
+
     pub fn string_table(&self, name: &str) -> Option<&CapturedStringTable> {
         if let Some(table) = self.string_tables.get(name) {
             return Some(table);

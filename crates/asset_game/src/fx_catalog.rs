@@ -578,6 +578,7 @@ impl FxCatalog {
         s: &fastfile_t5::ZoneStream<'_>,
         geometry: fastfile_t5::FxEffectDefGeometry,
         materials: &MaterialCatalog,
+        material_name: &impl Fn(fastfile_t5::Ptr) -> Option<String>,
     ) {
         use fastfile_t5::size as sz_t5;
         let Some(name_ptr) = geometry.name else {
@@ -616,7 +617,7 @@ impl FxCatalog {
         if let Some(arr) = geometry.elem_defs {
             for i in 0..geometry.elem_def_count {
                 let elem_ptr = arr.at(i * sz_t5::FX_ELEM_DEF);
-                match leftover_capture_elem_t5(s, elem_ptr, materials) {
+                match leftover_capture_elem_t5(s, elem_ptr, materials, material_name) {
                     Some(elem) => elems.push(elem),
                     None => {
                         self.capture_gaps += 1;
@@ -1992,6 +1993,7 @@ fn leftover_capture_elem_t5(
     s: &fastfile_t5::ZoneStream<'_>,
     p: fastfile_t5::Ptr,
     materials: &MaterialCatalog,
+    material_name: &impl Fn(fastfile_t5::Ptr) -> Option<String>,
 ) -> Option<OwnedFxElemDef> {
     use fastfile_t5::size as sz_t5;
     let raw = s.slice_at(p, 0, sz_t5::FX_ELEM_DEF).ok()?.to_vec();
@@ -2017,7 +2019,7 @@ fn leftover_capture_elem_t5(
         vis_count,
         sz_t5::FX_ELEM_VIS_STATE_SAMPLE,
     );
-    let visuals = leftover_capture_visuals_t5(s, p, &view, materials);
+    let visuals = leftover_capture_visuals_t5(s, p, &view, materials, material_name);
     let (effect_on_impact, effect_on_impact_hint) = capture_named_child(leftover_read_name_t5(
         s,
         p,
@@ -2228,6 +2230,7 @@ fn leftover_capture_visuals_t5(
     p: fastfile_t5::Ptr,
     view: &FxElemDefView,
     materials: &MaterialCatalog,
+    material_name: &impl Fn(fastfile_t5::Ptr) -> Option<String>,
 ) -> Vec<OwnedFxVisual> {
     use fastfile_t5::size as sz_t5;
     let t = view.elem_type;
@@ -2249,8 +2252,8 @@ fn leftover_capture_visuals_t5(
             .map(|i| {
                 let m = arr.at(i * sz_t5::FX_ELEM_MARK_VISUALS);
                 mark_pair(
-                    leftover_resolve_material_t5(s, materials, m.at(0)),
-                    leftover_resolve_material_t5(s, materials, m.at(4)),
+                    leftover_resolve_material_t5(s, materials, material_name, m.at(0)),
+                    leftover_resolve_material_t5(s, materials, material_name, m.at(4)),
                 )
             })
             .collect();
@@ -2278,11 +2281,21 @@ fn leftover_capture_visuals_t5(
             let arr = s.resolve_alias(arr);
             return (0..visual_count)
                 .map(|i| {
-                    leftover_resolve_material_t5(s, materials, arr.at(i * sz_t5::FX_ELEM_VISUALS))
+                    leftover_resolve_material_t5(
+                        s,
+                        materials,
+                        material_name,
+                        arr.at(i * sz_t5::FX_ELEM_VISUALS),
+                    )
                 })
                 .collect();
         }
-        return vec![leftover_resolve_material_t5(s, materials, vis)];
+        return vec![leftover_resolve_material_t5(
+            s,
+            materials,
+            material_name,
+            vis,
+        )];
     }
     if t == elem_type::MODEL {
         if visual_count > 1 {
@@ -2347,6 +2360,7 @@ fn leftover_capture_visuals_t5(
 fn leftover_resolve_material_t5(
     s: &fastfile_t5::ZoneStream<'_>,
     materials: &MaterialCatalog,
+    material_name: &impl Fn(fastfile_t5::Ptr) -> Option<String>,
     slot: fastfile_t5::Ptr,
 ) -> OwnedFxVisual {
     let slot_iw4 = t5_ptr_to_iw4(slot);
@@ -2357,9 +2371,11 @@ fn leftover_resolve_material_t5(
     let index = materials
         .material_index(slot_iw4)
         .or_else(|| alias.and_then(|target| materials.material_index(target)));
-    let name = index
-        .and_then(|i| materials.materials.get(i.get()).map(|m| m.name.to_string()))
-        .filter(|n| !n.is_empty());
+    let name = material_name(slot).or_else(|| {
+        index
+            .and_then(|i| materials.materials.get(i.get()).map(|m| m.name.to_string()))
+            .filter(|n| !n.is_empty())
+    });
     OwnedFxVisual::Material {
         material: FxElemMaterial::unresolved_for(Some(slot_iw4), alias),
         hint: name,

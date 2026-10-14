@@ -10,7 +10,7 @@ use crate::anim::remote_body::{
 };
 use crate::anim::scene_submission::{AnimDObjSceneSkels, AnimDObjSceneSubmission, AnimSceneSubmit};
 use crate::anim::world_weapon::PreparedItemCompositions;
-use crate::anim::xmodel_pose::{build_skin_layout, skin_packed_into, stream_lod_surface_rigid};
+use crate::anim::xmodel_pose::{build_skin_layout, stream_lod_surface_rigid};
 use crate::gaps::{RenderGap, RenderGapCause, RenderPresentationGaps};
 use crate::lighting_box_half;
 use crate::{
@@ -68,6 +68,81 @@ struct RemoteBodyLightingBinds {
     by_client: HashMap<u32, ModelLightingRequest>,
 }
 
+#[derive(Hash, PartialEq, Eq)]
+struct BodySkinShapeKey {
+    world_weapon: bool,
+    namespace: asset_core::AssetNamespace,
+    name: String,
+    lod: u8,
+    surfaces: Vec<(usize, bool)>,
+}
+
+#[derive(Resource, Default)]
+struct BodySkinShapes {
+    bodies: Option<Arc<asset_model::BodyMeshCatalog>>,
+    weapons: Option<Arc<asset_model::WorldWeaponCatalog>>,
+    shapes: std::sync::Mutex<
+        HashMap<BodySkinShapeKey, std::sync::Weak<render_frame::skinning::PackedSkinShape>>,
+    >,
+}
+
+impl BodySkinShapes {
+    fn prepare(&mut self, bodies: &PreparedBodies, weapons: Option<&PreparedWorldWeapons>) {
+        let same_bodies = self
+            .bodies
+            .as_ref()
+            .is_some_and(|old| Arc::ptr_eq(old, &bodies.0));
+        let same_weapons = match (&self.weapons, weapons) {
+            (Some(old), Some(new)) => Arc::ptr_eq(old, &new.0),
+            (None, None) => true,
+            _ => false,
+        };
+        let shapes = self
+            .shapes
+            .get_mut()
+            .expect("body skin cache is never poisoned");
+        if !same_bodies || !same_weapons {
+            shapes.clear();
+            self.bodies = Some(Arc::clone(&bodies.0));
+            self.weapons = weapons.map(|owner| Arc::clone(&owner.0));
+        }
+        shapes.retain(|_, shape| shape.strong_count() != 0);
+    }
+
+    fn shape(
+        &self,
+        skel: &ModelSkel,
+        namespace: asset_core::AssetNamespace,
+        world_weapon: bool,
+        lod: u8,
+        layout: &crate::anim::xmodel_pose::SkinLayout,
+        rigid: impl Fn(usize) -> bool,
+    ) -> Arc<render_frame::skinning::PackedSkinShape> {
+        let key = BodySkinShapeKey {
+            world_weapon,
+            namespace,
+            name: skel.name.clone(),
+            lod,
+            surfaces: layout
+                .surfaces
+                .iter()
+                .filter(|surface| surface.visible)
+                .map(|surface| (surface.surface_index, rigid(surface.surface_index)))
+                .collect(),
+        };
+        let mut shapes = self
+            .shapes
+            .lock()
+            .expect("body skin cache is never poisoned");
+        if let Some(shape) = shapes.get(&key).and_then(std::sync::Weak::upgrade) {
+            return shape;
+        }
+        let shape = crate::anim::xmodel_pose::packed_skin_shape(skel, lod, layout, rigid);
+        shapes.insert(key, Arc::downgrade(&shape));
+        shape
+    }
+}
+
 pub fn register_remote_body_systems(app: &mut App) {
     app.init_app::<RenderPresentationGaps>()
         .scoped::<RemoteBodyDrawPlan>(frame::MatchScope::Live)
@@ -75,6 +150,7 @@ pub fn register_remote_body_systems(app: &mut App) {
         .scoped::<RemoteSkinPoseHashes>(frame::MatchScope::Live)
         .scoped::<RemoteBodySkinnedQueue>(frame::MatchScope::Live)
         .scoped::<RemoteBodyLightingBinds>(frame::MatchScope::Live)
+        .scoped::<BodySkinShapes>(frame::MatchScope::Live)
         .scoped::<PreparedRemoteKits>(frame::MatchScope::Live)
         .add_systems(
             Update,
@@ -576,6 +652,7 @@ fn pose_remote_bodies(
     compositions: Res<PreparedItemCompositions>,
     mut trees: ResMut<RemoteBodyTrees>,
     mut pose_hashes: ResMut<RemoteSkinPoseHashes>,
+    mut skin_shapes: ResMut<BodySkinShapes>,
     mut submit: ResMut<RemoteBodySkinnedQueue>,
     dpvs: (
         Query<&GlobalTransform, With<render_scene::FpvLens>>,
@@ -749,10 +826,11 @@ fn pose_remote_bodies(
         return;
     }
 
+    skin_shapes.prepare(bodies, world_weapons.as_deref());
     let _skin_model = perf::Span::HostSkinModelMs.enter();
     let workers = skin_blend_worker_count(pose_frame.pending.len());
     let pending = std::mem::take(&mut pose_frame.pending);
-    let assembled = assemble_meshes_parallel(pending, workers);
+    let assembled = assemble_meshes_parallel(pending, workers, &skin_shapes);
     for assembled in assembled {
         if let Ok(assembled) = assembled {
             commit_assembled_body(
@@ -1109,6 +1187,9 @@ fn surface_material_key(
 
 fn skin_slot_into(
     skel: &ModelSkel,
+    namespace: asset_core::AssetNamespace,
+    world_weapon: bool,
+    skin_shapes: &BodySkinShapes,
     skin: &[Mat4],
     base: usize,
     lod: u8,
@@ -1130,14 +1211,27 @@ fn skin_slot_into(
         dest_first.saturating_add(layout.dest_vertex_n),
         [0u8; asset_iw4::size::GFX_PACKED_VERTEX],
     );
-    skin_packed_into(
-        skel,
-        |bone| skin[base + bone],
-        |surface| stream_lod_surface_rigid(skel, lod, entries, model, surface),
-        lod,
-        &layout,
-        &mut geom.packed[dest_first..dest_first + layout.dest_vertex_n],
-    );
+    let rigid = |surface| stream_lod_surface_rigid(skel, lod, entries, model, surface);
+    if layout.dest_vertex_n != 0 {
+        let shape = skin_shapes.shape(skel, namespace, world_weapon, lod, &layout, rigid);
+        let bone_end = base
+            .checked_add(shape.required_bones())
+            .ok_or("body bone range overflow")?;
+        let matrices = skin
+            .get(base..bone_end)
+            .ok_or("body bone range exceeds pose")?;
+        geom.skin_jobs.push(render_frame::skinning::PackedSkinJob {
+            shape,
+            bones: if matrices.is_empty() {
+                vec![Mat4::IDENTITY.to_cols_array_2d()]
+            } else {
+                matrices.iter().map(Mat4::to_cols_array_2d).collect()
+            },
+            destination: u32::try_from(dest_first)
+                .map_err(|_| "body skin destination exceeds u32")?,
+            offset: [0.0; 3],
+        });
+    }
     let vert_rebase = dest_first as u32;
     for surf in &layout.surfaces {
         if skip_empty && (!surf.visible || surf.index_count == 0) {
@@ -1182,12 +1276,16 @@ fn skin_blend_worker_count(jobs: usize) -> usize {
 fn assemble_meshes_parallel(
     jobs: Vec<PendingBodySkin<'_>>,
     workers: usize,
+    skin_shapes: &BodySkinShapes,
 ) -> Vec<Result<AssembledMeshes, String>> {
     if jobs.is_empty() {
         return Vec::new();
     }
     if workers <= 1 || jobs.len() == 1 {
-        return jobs.into_iter().map(assemble_meshes).collect();
+        return jobs
+            .into_iter()
+            .map(|job| assemble_meshes(job, skin_shapes))
+            .collect();
     }
     let chunk_len = jobs.len().div_ceil(workers);
     let mut chunks = Vec::new();
@@ -1205,9 +1303,12 @@ fn assemble_meshes_parallel(
     ComputeTaskPool::get()
         .scope(|scope| {
             for chunk in chunks {
-                scope.spawn(
-                    async move { chunk.into_iter().map(assemble_meshes).collect::<Vec<_>>() },
-                );
+                scope.spawn(async move {
+                    chunk
+                        .into_iter()
+                        .map(|job| assemble_meshes(job, skin_shapes))
+                        .collect::<Vec<_>>()
+                });
             }
         })
         .into_iter()
@@ -1224,13 +1325,20 @@ struct AssembledMeshes {
     lods: (Option<u8>, Option<u8>, Option<u8>),
 }
 
-fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> {
+fn assemble_meshes(
+    job: PendingBodySkin<'_>,
+    skin_shapes: &BodySkinShapes,
+) -> Result<AssembledMeshes, String> {
     let persist_key = job.persist_key;
     let transform = job.transform;
     let lods = (Some(job.body_lod), job.head_lod, job.gun_lod);
     let mut geom = job.dest;
+    let prior_skin_jobs = std::mem::take(&mut geom.skin_jobs);
     skin_slot_into(
         &job.body.skel,
+        job.body.namespace,
+        false,
+        skin_shapes,
         &job.matrices,
         0,
         job.body_lod,
@@ -1246,6 +1354,9 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
         (Some((head, base)), Some(lod)) => {
             skin_slot_into(
                 &head.skel,
+                head.namespace,
+                false,
+                skin_shapes,
                 &job.matrices,
                 base,
                 lod,
@@ -1264,6 +1375,9 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
         (Some(gun), Some(lod)) => {
             skin_slot_into(
                 &gun.entry.skel,
+                gun.entry.namespace,
+                true,
+                skin_shapes,
                 &job.matrices,
                 gun.base,
                 lod,
@@ -1282,6 +1396,9 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
         };
         skin_slot_into(
             &attachment.entry.skel,
+            attachment.entry.namespace,
+            true,
+            skin_shapes,
             &job.matrices,
             attachment.base,
             lod,
@@ -1293,6 +1410,7 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
             true,
         )?;
     }
+    drop(prior_skin_jobs);
     if let Some(camo) = job.camouflage {
         for surface in &mut geom.surfaces[gun_first..] {
             if let Some((_, to)) = camo
@@ -1452,6 +1570,15 @@ fn submit_remote_bodies(
             &item.geom.indices,
             item.geom.decoded_n,
         );
+        if let Some((vertex_base, _)) = appended {
+            for job in &item.geom.skin_jobs {
+                let mut job = job.clone();
+                job.destination = vertex_base
+                    .checked_add(job.destination)
+                    .expect("body skin destination fits u32");
+                plan.skin_jobs.push(job);
+            }
+        }
         let index_base = appended.map(|(_, index_base)| index_base);
         for surface in item.geom.surfaces.iter() {
             let Some(key) = surface.material.as_ref() else {

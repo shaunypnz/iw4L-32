@@ -639,7 +639,7 @@ fn commit_fx_transaction(
     clear_fx_owned_plans(&mut plan, &mut spark_plan, &mut mark_plan);
     env.staged_models.0.clear();
     if let Some(prepared) = &env.model_geometry {
-        env.staged_models.0.use_prepared(&prepared.0);
+        env.staged_models.0.use_prepared(prepared);
     } else {
         env.staged_models.0 = FxModelDrawPlan::default();
     }
